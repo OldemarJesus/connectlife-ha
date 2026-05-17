@@ -1,6 +1,8 @@
 """Shared FastMCP server instance and session manager singleton."""
 
 import fastmcp
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
 
 from .session import SessionManager
 
@@ -14,3 +16,9 @@ mcp = fastmcp.FastMCP(
 )
 
 session_manager = SessionManager()
+
+
+@mcp.custom_route("/health", methods=["GET"], include_in_schema=False)
+async def health(_: Request) -> Response:
+    """Container health check endpoint."""
+    return JSONResponse({"status": "ok"})
