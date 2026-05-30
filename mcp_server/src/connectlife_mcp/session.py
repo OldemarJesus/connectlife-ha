@@ -15,6 +15,7 @@ _LOGGER = logging.getLogger(__name__)
 SESSION_TTL_SECONDS: int = int(os.environ.get("CONNECTLIFE_SESSION_TTL", "86400"))
 POLL_INTERVAL_SECONDS: int = int(os.environ.get("CONNECTLIFE_POLL_INTERVAL", "60"))
 MAX_SESSIONS: int = int(os.environ.get("CONNECTLIFE_MAX_SESSIONS", "100"))
+_DEFAULT_SESSION_ID: str = "__default__"
 
 
 def _utcnow() -> datetime:
@@ -42,10 +43,35 @@ class SessionManager:
     def __init__(self) -> None:
         self._sessions: dict[str, Session] = {}
         self._lock = asyncio.Lock()
+        self._default_session_id: str | None = None
+        self._default_credentials: tuple[str, str] | None = None
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    async def init_default_session(self) -> None:
+        """Create a default session from environment variables on startup."""
+        username = os.environ.get("MCP_CONNECTLIFE_USERNAME")
+        password = os.environ.get("MCP_CONNECTLIFE_PASSWORD")
+        if not username or not password:
+            return
+
+        self._default_session_id = _DEFAULT_SESSION_ID
+        self._default_credentials = (username, password)
+
+        try:
+            session = await self._relogin_default()
+        except Exception:
+            _LOGGER.exception("Failed to initialize default session for %s", username)
+            return
+
+        if session.poll_task is None or session.poll_task.done():
+            session.poll_task = asyncio.create_task(
+                self._poll_loop(self._default_session_id),
+                name="poll-default",
+            )
+        _LOGGER.info("Default session initialized for %s", username)
 
     async def create(self, username: str, password: str) -> str:
         """Authenticate with ConnectLife and return a new session token.
@@ -61,17 +87,7 @@ class SessionManager:
                 if len(self._sessions) >= MAX_SESSIONS:
                     raise RuntimeError("Maximum concurrent sessions reached")
 
-        api = ConnectLifeApi(username, password)
-        try:
-            if not await api.authenticate():
-                raise LifeConnectAuthError("Authentication failed")
-            await api.login()
-            await api.get_appliances()
-        except LifeConnectAuthError:
-            raise
-        except LifeConnectError as err:
-            raise ConnectionError(f"ConnectLife API error: {err}") from err
-
+        api = await self._authenticate(username, password)
         session_id = secrets.token_urlsafe(32)
         session = Session(
             session_id=session_id,
@@ -102,6 +118,31 @@ class SessionManager:
         session.last_used = _utcnow()
         return session
 
+    async def resolve_session(self, session_id: str | None = None) -> Session:
+        """Resolve session by id, or the default session if id is not provided.
+
+        For the default session, automatically re-authenticates if expired or missing.
+        """
+        if session_id and session_id != self._default_session_id:
+            return self.get(session_id)
+
+        if self._default_session_id is None:
+            raise SessionError("No session provided and no default session configured")
+
+        session = self._sessions.get(self._default_session_id)
+        ttl = timedelta(seconds=SESSION_TTL_SECONDS)
+
+        if session is None or _utcnow() - session.last_used > ttl:
+            session = await self._relogin_default()
+            if session.poll_task is None or session.poll_task.done():
+                session.poll_task = asyncio.create_task(
+                    self._poll_loop(self._default_session_id),
+                    name="poll-default",
+                )
+
+        session.last_used = _utcnow()
+        return session
+
     async def remove(self, session_id: str) -> bool:
         """Cancel and remove a session. Returns True if the session existed."""
         async with self._lock:
@@ -129,21 +170,85 @@ class SessionManager:
         if expired:
             _LOGGER.debug("Evicted %d expired session(s)", len(expired))
 
+    async def _authenticate(self, username: str, password: str) -> ConnectLifeApi:
+        """Authenticate with ConnectLife and return an API client."""
+        api = ConnectLifeApi(username, password)
+        try:
+            if not await api.authenticate():
+                raise LifeConnectAuthError("Authentication failed")
+            await api.login()
+            await api.get_appliances()
+        except LifeConnectAuthError:
+            raise
+        except LifeConnectError as err:
+            raise ConnectionError(f"ConnectLife API error: {err}") from err
+        return api
+
+    async def _relogin_default(self) -> Session:
+        """Re-authenticate the default session and update it in-place."""
+        if self._default_credentials is None:
+            raise SessionError("Default session not configured")
+
+        username, password = self._default_credentials
+        api = await self._authenticate(username, password)
+
+        async with self._lock:
+            session = self._sessions.get(self._default_session_id)
+            if session is None:
+                session = Session(
+                    session_id=self._default_session_id,
+                    username=username,
+                    api=api,
+                    appliances={a.device_id: a for a in api.appliances},
+                )
+                self._sessions[self._default_session_id] = session
+            else:
+                session.api = api
+                session.appliances = {a.device_id: a for a in api.appliances}
+                session.last_used = _utcnow()
+
+        _LOGGER.info("Default session re-authenticated for %s", username)
+        return session
+
     async def _poll_loop(self, session_id: str) -> None:
         """Background coroutine: refresh appliance state every POLL_INTERVAL_SECONDS."""
         ttl = timedelta(seconds=SESSION_TTL_SECONDS)
+        is_default = session_id == self._default_session_id
         while True:
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
             session = self._sessions.get(session_id)
             if session is None:
+                if is_default and self._default_credentials is not None:
+                    try:
+                        await self._relogin_default()
+                    except Exception:
+                        _LOGGER.exception("Default session re-login during poll failed")
+                    continue
                 return
             if _utcnow() - session.last_used > ttl:
+                if is_default:
+                    try:
+                        await self._relogin_default()
+                    except Exception:
+                        _LOGGER.exception("Default session TTL re-login failed")
+                    continue
                 await self.remove(session_id)
                 return
             try:
                 await session.api.get_appliances()
                 session.appliances = {a.device_id: a for a in session.api.appliances}
+                if is_default:
+                    session.last_used = _utcnow()
             except LifeConnectAuthError:
+                if is_default:
+                    _LOGGER.warning(
+                        "Default session auth expired during poll — re-authenticating"
+                    )
+                    try:
+                        await self._relogin_default()
+                    except Exception:
+                        _LOGGER.exception("Default session re-login after auth error failed")
+                    continue
                 _LOGGER.warning(
                     "Session auth expired during poll (id=…%s) — removing", session_id[-8:]
                 )

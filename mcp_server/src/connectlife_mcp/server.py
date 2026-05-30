@@ -10,7 +10,11 @@ mcp = fastmcp.FastMCP(
     "ConnectLife MCP Server",
     instructions=(
         "Multi-tenant MCP server for ConnectLife smart appliances. "
-        "Call 'login' first to obtain a session_id, then pass it to every other tool. "
+        "If MCP_CONNECTLIFE_USERNAME and MCP_CONNECTLIFE_PASSWORD "
+        "environment variables are set, authentication is automatic "
+        "and tools can be called directly without a session_id. "
+        "Otherwise, call 'login' first to obtain a session_id, "
+        "then pass it to every other tool. "
         "Call 'logout' when done to free server resources."
     ),
 )
