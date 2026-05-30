@@ -19,28 +19,28 @@ def _appliance_summary(a: ConnectLifeAppliance) -> dict:
 
 
 @mcp.tool()
-async def list_appliances(session_id: str) -> dict:
+async def list_appliances(session_id: str = "") -> dict:
     """List all smart appliances linked to the ConnectLife account.
 
     Appliance data is refreshed automatically every 60 seconds in the background.
     Returns a list under the ``appliances`` key, or ``error`` on failure.
     """
     try:
-        session = session_manager.get(session_id)
+        session = await session_manager.resolve_session(session_id or None)
     except SessionError as err:
         return {"error": str(err)}
     return {"appliances": [_appliance_summary(a) for a in session.appliances.values()]}
 
 
 @mcp.tool()
-async def get_appliance(session_id: str, device_id: str) -> dict:
+async def get_appliance(session_id: str = "", device_id: str = "") -> dict:
     """Get details for a specific appliance by its ``device_id``.
 
     Returns device metadata (name, model, type/feature codes, online state),
     or ``error`` if not found.
     """
     try:
-        session = session_manager.get(session_id)
+        session = await session_manager.resolve_session(session_id or None)
     except SessionError as err:
         return {"error": str(err)}
     appliance = session.appliances.get(device_id)
@@ -50,14 +50,14 @@ async def get_appliance(session_id: str, device_id: str) -> dict:
 
 
 @mcp.tool()
-async def get_status(session_id: str, device_id: str) -> dict:
+async def get_status(session_id: str = "", device_id: str = "") -> dict:
     """Get the current status (all raw property values) of an appliance.
 
     Returns a ``status`` mapping of property name → current value.
     The property names match the ConnectLife API and the data dictionary YAML files.
     """
     try:
-        session = session_manager.get(session_id)
+        session = await session_manager.resolve_session(session_id or None)
     except SessionError as err:
         return {"error": str(err)}
     appliance = session.appliances.get(device_id)
@@ -72,13 +72,13 @@ async def get_status(session_id: str, device_id: str) -> dict:
 
 
 @mcp.tool()
-async def get_daily_energy(session_id: str, device_id: str) -> dict:
+async def get_daily_energy(session_id: str = "", device_id: str = "") -> dict:
     """Get today's energy consumption in kWh for an appliance.
 
     Returns ``daily_energy_kwh`` (float or null if not supported by the device).
     """
     try:
-        session = session_manager.get(session_id)
+        session = await session_manager.resolve_session(session_id or None)
     except SessionError as err:
         return {"error": str(err)}
     appliance = session.appliances.get(device_id)

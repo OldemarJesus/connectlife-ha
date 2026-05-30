@@ -8,10 +8,10 @@ from ..session import SessionError
 
 @mcp.tool()
 async def update_property(
-    session_id: str,
-    device_id: str,
-    property_name: str,
-    value: str,
+    session_id: str = "",
+    device_id: str = "",
+    property_name: str = "",
+    value: str = "",
 ) -> dict:
     """Update a single property on an appliance.
 
@@ -22,7 +22,7 @@ async def update_property(
     Returns the updated property and value on success, or ``error`` on failure.
     """
     try:
-        session = session_manager.get(session_id)
+        session = await session_manager.resolve_session(session_id or None)
     except SessionError as err:
         return {"error": str(err)}
     appliance = session.appliances.get(device_id)
@@ -38,9 +38,9 @@ async def update_property(
 
 @mcp.tool()
 async def update_properties(
-    session_id: str,
-    device_id: str,
-    properties: dict[str, str],
+    session_id: str = "",
+    device_id: str = "",
+    properties: dict[str, str] = None,
 ) -> dict:
     """Update multiple properties on an appliance in a single API call.
 
@@ -49,8 +49,10 @@ async def update_properties(
 
     Returns the updated properties on success, or ``error`` on failure.
     """
+    if properties is None:
+        properties = {}
     try:
-        session = session_manager.get(session_id)
+        session = await session_manager.resolve_session(session_id or None)
     except SessionError as err:
         return {"error": str(err)}
     appliance = session.appliances.get(device_id)
